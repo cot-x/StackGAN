@@ -41,7 +41,6 @@ from torchvision import transforms
 from torchvision.utils import save_image
 
 from transformers import AutoTokenizer, AutoModel, DataCollatorWithPadding
-os.environ['TRANSFORMERS_NO_ADVISORY_WARNINGS'] = 'true'
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
@@ -60,6 +59,12 @@ class Bert(nn.Module):
     def to(self, device):
         self.model.to(device)
         return self
+
+    def eval(self):
+        self.model.eval()
+
+    def train(self):
+        self.model.train()
     
     def forward(self, **x):
         x = self.model(**x)['pooler_output']
@@ -522,7 +527,7 @@ class Solver:
         else:
             return Solver(args)
     
-    def trainGAN(self, epoch, iters, max_iters, real_img, texts, a=0, b=1, c=1, lambda_ms=1):
+    def trainGAN(self, epoch, iters, max_iters, real_img, texts, a=0, b=1, c=1):
         ### Train with LSGAN.
         ### for example, (a, b, c) = 0, 1, 1 or (a, b, c) = -1, 1, 0
         
@@ -536,6 +541,7 @@ class Solver:
         # ================================================================================ #
         
         text = self.text_encoder(**texts)
+        text = text.detach()
         
         fake_img_1, vc_loss_1, noise = self.stage1_g(text)
         fake_score_1 = self.stage1_d(fake_img_1, text)
@@ -588,6 +594,7 @@ class Solver:
         # ================================================================================ #
         
         text = self.text_encoder(**texts)
+        text = text.detach()
         
         fake_img_1, vc_loss_1, noise = self.stage1_g(text)
         fake_score_1 = self.stage1_d(fake_img_1, text)
@@ -601,10 +608,10 @@ class Solver:
         # Mode Seeking Loss
         lz = torch.mean(torch.abs(fake_img_2 - _fake_img_2)) / torch.mean(torch.abs(noise - _noise))
         eps = 1 * 1e-5
-        ms_loss = 1 / (lz + eps) * lambda_ms
+        ms_loss = 1 / (lz + eps)
         
         # Backward and optimize.
-        g_loss = 0.5 * fake_src_loss / self.args.batch_size + ms_loss
+        g_loss = 0.5 * fake_src_loss / self.args.batch_size + self.args.lambda_ms * ms_loss
         self.optimizer_G.zero_grad()
         g_loss.backward()
         self.optimizer_G.step()
@@ -628,7 +635,8 @@ class Solver:
     def train(self):
         print(f'Use Device: {self.device}')
         torch.backends.cudnn.benchmark = True
-        
+
+        self.text_encoder.eval()
         self.stage1_g.train()
         self.stage1_d.train()
         self.stage2_g.train()
@@ -643,6 +651,7 @@ class Solver:
         hyper_params["Mul Discriminator's LR"] = self.args.mul_lr_dis
         hyper_params['Batch Size'] = self.args.batch_size
         hyper_params['Num Train'] = self.args.num_train
+        hyper_params['Lambda Mode-Seeking'] = self.args.lambda_ms
         
         for key in hyper_params.keys():
             print(f'{key}: {hyper_params[key]}')
@@ -672,16 +681,15 @@ class Solver:
             
             print(f'Epoch[{self.epoch}]'
                   + f' LR[G({self.scheduler_G.get_last_lr()[0]:.5f}) D({self.scheduler_D.get_last_lr()[0]:.5f})]'
-                  + f'G({epoch_loss_G}) + D({epoch_loss_D}) = {epoch_loss}]')
+                  + f' G({epoch_loss_G}) + D({epoch_loss_D}) = {epoch_loss}]')
                     
             if not self.args.noresume:
                 self.save_resume()
     
     def generate(self, text):
+        self.text_encoder.eval()
         self.stage1_g.eval()
-        self.stage1_d.eval()
         self.stage2_g.eval()
-        self.stage2_d.eval()
         
         texts = self.tokenize([text]).to(self.device)
         print(self.tokenizer.convert_ids_to_tokens(texts['input_ids'][0].tolist()))
@@ -690,7 +698,8 @@ class Solver:
         fake_img_1, _, _ = self.stage1_g(texts)
         fake_img_2, _ = self.stage2_g(fake_img_1, texts)
         
-        save_image(fake_img_2[0], os.path.join(self.args.result_dir, f'generated_{time.time()}.png'))
+        save_image(fake_img_1[0], os.path.join(self.args.result_dir, f'generated_1_{time.time()}.png'))
+        save_image(fake_img_2[0], os.path.join(self.args.result_dir, f'generated_2_{time.time()}.png'))
         print('New picture was generated.')
 
 
@@ -722,6 +731,7 @@ if __name__ == '__main__':
     parser.add_argument('--mul_lr_dis', type=float, default=4)
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--num_train', type=int, default=100)
+    parser.add_argument('--lambda_ms', type=float, default=1)
     parser.add_argument('--cpu', action='store_true')
     parser.add_argument('--noresume', action='store_true')
     parser.add_argument('--generate', type=str, default='')
