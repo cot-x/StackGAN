@@ -456,13 +456,13 @@ class Solver:
         
         self.optimizer_G = optim.Adam(itertools.chain(self.stage1_g.parameters(),
                                                       self.stage2_g.parameters()),
-                                      lr=self.args.lr, betas=(0, 0.9))
+                                      lr=2 * self.args.lr, betas=(0, 0.9))
         self.optimizer_D = optim.Adam(itertools.chain(self.stage1_d.parameters(),
                                                       self.stage2_d.parameters()),
-                                      lr=self.args.lr * self.args.mul_lr_dis, betas=(0, 0.9))
+                                      lr=2 * self.args.lr * self.args.mul_lr_dis, betas=(0, 0.9))
         
-        self.scheduler_G = CosineAnnealingLR(self.optimizer_G, T_max=4, eta_min=self.args.lr/4)
-        self.scheduler_D = CosineAnnealingLR(self.optimizer_D, T_max=4, eta_min=(self.args.lr * self.args.mul_lr_dis)/4)
+        self.scheduler_G = CosineAnnealingLR(self.optimizer_G, T_max=4, eta_min=self.args.lr/2)
+        self.scheduler_D = CosineAnnealingLR(self.optimizer_D, T_max=4, eta_min=(self.args.lr * self.args.mul_lr_dis)/2)
         
         self.pseudo_aug = 0.0
         self.epoch = 0
@@ -520,9 +520,8 @@ class Solver:
     def load(args, resume=True):
         if resume and os.path.exists('resume.pkl'):
             with open(os.path.join('.', 'resume.pkl'), 'rb') as f:
-                print('Load resume.')
                 solver = load(f)
-                solver.args = args
+                print('Loaded resume.')
                 return solver
         else:
             return Solver(args)
@@ -635,7 +634,9 @@ class Solver:
     def train(self):
         print(f'Use Device: {self.device}')
         torch.backends.cudnn.benchmark = True
-
+        
+        print('Use Scheduler: CosineAnnealingLR')
+        
         self.text_encoder.eval()
         self.stage1_g.train()
         self.stage1_d.train()
@@ -674,15 +675,15 @@ class Solver:
                 epoch_loss_G += loss['G/loss']
                 #experiment.log_metrics(loss)
             
-            self.scheduler_G.step()
-            self.scheduler_D.step()
-            
             epoch_loss = epoch_loss_G + epoch_loss_D
             
             print(f'Epoch[{self.epoch}]'
                   + f' LR[G({self.scheduler_G.get_last_lr()[0]:.5f}) D({self.scheduler_D.get_last_lr()[0]:.5f})]'
                   + f' G({epoch_loss_G}) + D({epoch_loss_D}) = {epoch_loss}]')
-                    
+            
+            self.scheduler_G.step()
+            self.scheduler_D.step()
+            
             if not self.args.noresume:
                 self.save_resume()
     
