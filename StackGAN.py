@@ -454,12 +454,18 @@ class Solver:
         self.stage2_g.apply(self.weights_init)
         self.stage2_d.apply(self.weights_init)
         
-        self.optimizer_G = optim.Adam(itertools.chain(self.stage1_g.parameters(),
-                                                      self.stage2_g.parameters()),
-                                      lr=2 * self.args.lr, betas=(0, 0.9))
-        self.optimizer_D = optim.Adam(itertools.chain(self.stage1_d.parameters(),
-                                                      self.stage2_d.parameters()),
-                                      lr=2 * self.args.lr * self.args.mul_lr_dis, betas=(0, 0.9))
+        self.optimizer_G = optim.Adam([{'params': itertools.chain(self.stage1_g.parameters(),
+                                                                  self.stage2_g.parameters()),
+                                        'lr': 2 * self.args.lr},
+                                       {'params': self.text_encoder.parameters(),
+                                        'lr': 0.5 * self.args.lr}],
+                                      betas=(0, 0.9))
+        self.optimizer_D = optim.Adam([{'params': itertools.chain(self.stage1_d.parameters(),
+                                                                  self.stage2_d.parameters()),
+                                        'lr': 2 * self.args.lr * self.args.mul_lr_dis},
+                                       {'params': self.text_encoder.parameters(),
+                                        'lr': 0.5 * self.args.lr}],
+                                      betas=(0, 0.9))
         
         self.scheduler_G = CosineAnnealingLR(self.optimizer_G, T_max=4, eta_min=self.args.lr/2)
         self.scheduler_D = CosineAnnealingLR(self.optimizer_D, T_max=4, eta_min=(self.args.lr * self.args.mul_lr_dis)/2)
@@ -637,7 +643,7 @@ class Solver:
         
         print('Use Scheduler: CosineAnnealingLR')
         
-        self.text_encoder.eval()
+        self.text_encoder.train()
         self.stage1_g.train()
         self.stage1_d.train()
         self.stage2_g.train()
