@@ -40,6 +40,9 @@ from torchvision.datasets import ImageFolder
 from torchvision import transforms
 from torchvision.utils import save_image
 
+#from torchinfo import summary
+#from pprint import pprint
+
 from transformers import AutoTokenizer, AutoModel, DataCollatorWithPadding
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -55,19 +58,11 @@ class Bert(nn.Module):
     def __init__(self):
         super().__init__()
         self.model = AutoModel.from_pretrained(Bert.model_name)
-        
-    def to(self, device):
-        self.model.to(device)
-        return self
-
-    def eval(self):
-        self.model.eval()
-
-    def train(self):
-        self.model.train()
     
     def forward(self, **x):
-        x = self.model(**x)['pooler_output']
+        x = self.model(**x)['last_hidden_state']
+        x = x[:, 0, :] # [CLS]
+        x = x.view(x.size(0), -1)
         return x
 
 
@@ -453,18 +448,27 @@ class Solver:
         self.stage1_d.apply(self.weights_init)
         self.stage2_g.apply(self.weights_init)
         self.stage2_d.apply(self.weights_init)
+
+        ## DEBUG for check
+        #print(summary(self.text_encoder))
+        #pprint(dir(self.text_encoder.model))
+        #print(summary(self.text_encoder.model.encoder))
+        for param in self.text_encoder.parameters():
+            param.requires_grad = False
+        for param in self.text_encoder.model.encoder.layer[-1].parameters():
+            param.requires_grad = True
         
-        self.optimizer_G = optim.Adam([{'params': itertools.chain(self.stage1_g.parameters(),
+        self.optimizer_G = optim.Adam([{'params': self.text_encoder.model.encoder.layer[-1].parameters(),
+                                        'lr': 0.5 * self.args.lr},
+                                       {'params': itertools.chain(self.stage1_g.parameters(),
                                                                   self.stage2_g.parameters()),
-                                        'lr': 2 * self.args.lr},
-                                       {'params': self.text_encoder.parameters(),
-                                        'lr': 0.5 * self.args.lr}],
+                                        'lr': 2 * self.args.lr}],
                                       betas=(0, 0.9))
-        self.optimizer_D = optim.Adam([{'params': itertools.chain(self.stage1_d.parameters(),
+        self.optimizer_D = optim.Adam([{'params': self.text_encoder.model.encoder.layer[-1].parameters(),
+                                        'lr': 0.5 * self.args.lr},
+                                       {'params': itertools.chain(self.stage1_d.parameters(),
                                                                   self.stage2_d.parameters()),
-                                        'lr': 2 * self.args.lr * self.args.mul_lr_dis},
-                                       {'params': self.text_encoder.parameters(),
-                                        'lr': 0.5 * self.args.lr}],
+                                        'lr': 2 * self.args.lr * self.args.mul_lr_dis}],
                                       betas=(0, 0.9))
         
         self.scheduler_G = CosineAnnealingLR(self.optimizer_G, T_max=4, eta_min=self.args.lr/2)
@@ -484,7 +488,6 @@ class Solver:
                                            transform=transforms.Compose([
                                                transforms.Resize(int(img_size)),
                                                transforms.RandomCrop(img_size),
-                                               transforms.RandomHorizontalFlip(),
                                                transforms.ToTensor()
                                            ]))
         self.dataloader = DataLoader(self.dataset, batch_size=self.args.batch_size,
@@ -497,26 +500,32 @@ class Solver:
         return texts
             
     def save_state(self, epoch):
+        self.text_encoder.cpu()
         self.stage1_g.cpu(), self.stage1_d.cpu(), self.stage2_g.cpu(), self.stage2_d.cpu()
+        torch.save(self.text_encoder.state_dict(), os.path.join(self.args.weight_dir, f'weight_TE.{epoch}.pth'))
         torch.save(self.stage1_g.state_dict(), os.path.join(self.args.weight_dir, f'weight_G1.{epoch}.pth'))
         torch.save(self.stage1_d.state_dict(), os.path.join(self.args.weight_dir, f'weight_D1.{epoch}.pth'))
         torch.save(self.stage2_g.state_dict(), os.path.join(self.args.weight_dir, f'weight_G2.{epoch}.pth'))
         torch.save(self.stage2_d.state_dict(), os.path.join(self.args.weight_dir, f'weight_D2.{epoch}.pth'))
+        self.text_encoder.to(self.device)
         self.stage1_g.to(self.device), self.stage1_d.to(self.device), self.stage2_g.to(self.device), self.stage2_d.to(self.device)
         
     def load_state(self):
+        if os.path.exists('weight_TE.pth'):
+            self.text_encoder.load_state_dict(torch.load('weight_TE.pth', map_location=self.device))
+            print('Loaded TextEncoder network states.')
         if os.path.exists('weight_G1.pth'):
             self.stage1_g.load_state_dict(torch.load('weight_G1.pth', map_location=self.device))
-            print('Loaded Stage1_G network state.')
+            print('Loaded Stage1_G network states.')
         if os.path.exists('weight_D1.pth'):
             self.stage1_d.load_state_dict(torch.load('weight_D1.pth', map_location=self.device))
-            print('Loaded Stage1_D network state.')
+            print('Loaded Stage1_D network states.')
         if os.path.exists('weight_G2.pth'):
             self.stage2_g.load_state_dict(torch.load('weight_G2.pth', map_location=self.device))
-            print('Loaded Stage2_G network state.')
+            print('Loaded Stage2_G network states.')
         if os.path.exists('weight_D2.pth'):
             self.stage2_d.load_state_dict(torch.load('weight_D2.pth', map_location=self.device))
-            print('Loaded Stage2_D network state.')
+            print('Loaded Stage2_D network states.')
     
     def save_resume(self):
         with open(os.path.join('.', f'resume.pkl'), 'wb') as f:
@@ -685,7 +694,7 @@ class Solver:
             
             print(f'Epoch[{self.epoch}]'
                   + f' LR[G({self.scheduler_G.get_last_lr()[0]:.5f}) D({self.scheduler_D.get_last_lr()[0]:.5f})]'
-                  + f' G({epoch_loss_G}) + D({epoch_loss_D}) = {epoch_loss}]')
+                  + f' G({epoch_loss_G}) + D({epoch_loss_D}) = {epoch_loss}')
             
             self.scheduler_G.step()
             self.scheduler_D.step()
