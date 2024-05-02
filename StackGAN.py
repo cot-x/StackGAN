@@ -459,13 +459,13 @@ class Solver:
             param.requires_grad = True
         
         self.optimizer_G = optim.Adam([{'params': self.text_encoder.model.encoder.layer[-1].parameters(),
-                                        'lr': 0.5 * self.args.lr},
+                                        'lr': self.args.lr},
                                        {'params': itertools.chain(self.stage1_g.parameters(),
                                                                   self.stage2_g.parameters()),
                                         'lr': 2 * self.args.lr}],
                                       betas=(0, 0.9))
         self.optimizer_D = optim.Adam([{'params': self.text_encoder.model.encoder.layer[-1].parameters(),
-                                        'lr': 0.5 * self.args.lr * self.args.mul_lr_dis},
+                                        'lr': self.args.lr * self.args.mul_lr_dis},
                                        {'params': itertools.chain(self.stage1_d.parameters(),
                                                                   self.stage2_d.parameters()),
                                         'lr': 2 * self.args.lr * self.args.mul_lr_dis}],
@@ -693,7 +693,7 @@ class Solver:
             epoch_loss = epoch_loss_G + epoch_loss_D
             
             print(f'Epoch[{self.epoch}]'
-                  + f' LR[G({self.scheduler_G.get_last_lr()[0]:.5f}, {self.scheduler_G.get_last_lr()[1]:.5f}) D({self.scheduler_D.get_last_lr()[0]:.5f}, {self.scheduler_D.get_last_lr()[1]:.5f})]'
+                  + f' LR[G({self.scheduler_G.get_last_lr()[0]:.6f}, {self.scheduler_G.get_last_lr()[1]:.6f}) D({self.scheduler_D.get_last_lr()[0]:.6f}, {self.scheduler_D.get_last_lr()[1]:.6f})]'
                   + f' G({epoch_loss_G}) + D({epoch_loss_D}) = {epoch_loss}')
             
             self.scheduler_G.step()
