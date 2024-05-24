@@ -40,12 +40,13 @@ from torchvision.datasets import ImageFolder
 from torchvision import transforms
 from torchvision.utils import save_image
 
-#from torchinfo import summary
-#from pprint import pprint
+from torchinfo import summary
+from pprint import pprint
 
 from transformers import AutoTokenizer, AutoModel, DataCollatorWithPadding
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
 
 # In[ ]:
@@ -313,15 +314,16 @@ class STAGE2_D(nn.Module):
 
 
 class ImageDataset(Dataset):
-    IMG_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.bmp']
-    
     def __init__(self, img_dir, transform=None):
         self.paths = self.get_paths(img_dir)
         self.transform = transform
     
     def get_paths(self, img_dir):
-        img_dir = Path(img_dir)
-        paths = [p for p in img_dir.iterdir() if p.suffix in ImageDataset.IMG_EXTENSIONS]
+        paths = []
+        print('Make image-path of directories.')
+        for root, dirs, files in tqdm(os.walk(img_dir)):
+            for file in files:
+                paths += [Path(os.path.join(root, file))]
         return paths
     
     def __getitem__(self, index):
@@ -338,32 +340,37 @@ class ImageDataset(Dataset):
 # In[ ]:
 
 
-class TextData:
-    def __init__(self, csv_path):
-        df = pd.read_csv(csv_path, sep='|')
-        self.filenames = df.iloc[:,0].tolist()
-        self.texts = [str(text) for text in df.iloc[:,2].tolist()]
+class TextDataset:
+    def __init__(self, text_dir, tokenizer, data_collator):
+        self.filenames = []
+        self.texts = []
+        print('Make text-data of directories.')
+        for root, dirs, files in tqdm(os.walk(text_dir)):
+            for file in files:
+                filename = os.path.splitext(file)
+                if filename[1] == '.txt':
+                    with open(os.path.join(root, file), 'r') as f:
+                        self.filenames += [filename[0] + '.jpg']
+                        self.texts += [tokenizer(f.read())]
+        self.texts = data_collator(self.texts)
     
     def __getitem__(self, index):
-        return self.filenames[index], self.texts[index]
-        
-    def __len__(self):
-        return len(self.texts)
+        return self.filenames[index], self.texts['attention_mask'][index], self.texts['input_ids'][index], self.texts['token_type_ids'][index]
     
-    def tolist(self):
-        return sum(self.texts, [])
+    def __len__(self):
+        return len(self.filenames)
 
 
 # In[ ]:
 
 
 class TextAndImageDataset(ImageDataset):
-    def __init__(self, csv_path, img_dir, transform=None):
+    def __init__(self, text_dir, img_dir, tokenizer, data_collator, transform=None):
         super().__init__(img_dir, transform)
-        self.text_data = TextData(csv_path)
+        self.textdata = TextDataset(text_dir, tokenizer, data_collator)
     
     def __getitem__(self, index):
-        filename, text = self.text_data[index]
+        filename, attention_mask, input_ids, token_type_ids = self.textdata[index]
         
         path = [path for path in self.paths if filename == path.name][0]
         image = Image.open(path)
@@ -373,54 +380,10 @@ class TextAndImageDataset(ImageDataset):
             toTensor = transforms.ToTensor()
             image = toTensor(image)
         
-        return image, text
-
-
-# In[ ]:
-
-
-class RandomErasing:
-    def __init__(self, p=0.5, erase_low=0.02, erase_high=0.33, aspect_rl=0.3, aspect_rh=3.3):
-        self.p = p
-        self.erase_low = erase_low
-        self.erase_high = erase_high
-        self.aspect_rl = aspect_rl
-        self.aspect_rh = aspect_rh
-
-    def __call__(self, image):
-        if np.random.rand() <= self.p:
-            c, h, w = image.shape
-
-            mask_area = np.random.uniform(self.erase_low, self.erase_high) * (h * w)
-            mask_aspect_ratio = np.random.uniform(self.aspect_rl, self.aspect_rh)
-            mask_w = int(np.sqrt(mask_area / mask_aspect_ratio))
-            mask_h = int(np.sqrt(mask_area * mask_aspect_ratio))
-
-            mask = torch.Tensor(np.random.rand(c, mask_h, mask_w) * 255)
-
-            left = np.random.randint(0, w)
-            top = np.random.randint(0, h)
-            right = left + mask_w
-            bottom = top + mask_h
-
-            if right <= w and bottom <= h:
-                image[:, top:bottom, left:right] = mask
-        
-        return image
-
-
-# In[ ]:
-
-
-class Util:
-    @staticmethod
-    def loadImages(batch_size, folder_path, size):
-        imgs = ImageFolder(folder_path, transform=transforms.Compose([
-            transforms.Resize(int(size)),
-            transforms.RandomCrop(size),
-            transforms.ToTensor()
-        ]))
-        return DataLoader(imgs, batch_size=batch_size, shuffle=True, drop_last=True)
+        return image, attention_mask, input_ids, token_type_ids
+    
+    def __len__(self):
+        return len(self.textdata)
 
 
 # In[ ]:
@@ -432,8 +395,6 @@ class Solver:
         self.device = torch.device("cuda" if has_cuda else "cpu")
         
         self.args = args
-        
-        self.load_dataset()
         
         self.text_encoder = Bert().to(self.device)
         self.tokenizer = AutoTokenizer.from_pretrained(Bert.model_name)
@@ -484,21 +445,18 @@ class Solver:
                 module.bias.data.fill_(0)
             
     def load_dataset(self, img_size=256):
-        self.dataset = TextAndImageDataset(self.args.csv_path, self.args.image_dir,
+        self.dataset = TextAndImageDataset(self.args.text_dir, self.args.image_dir,
+                                           self.tokenizer, self.data_collator,
                                            transform=transforms.Compose([
                                                transforms.Resize(int(img_size)),
                                                transforms.RandomCrop(img_size),
-                                               transforms.ToTensor()
+                                               transforms.ToTensor(),
+                                               transforms.Lambda(lambda x: x.repeat(3, 1, 1) if x.size(0) == 1 else x)
                                            ]))
         self.dataloader = DataLoader(self.dataset, batch_size=self.args.batch_size,
                                      shuffle=True, drop_last=True, num_workers=os.cpu_count())
         self.max_iters = len(iter(self.dataloader))
-
-    def tokenize(self, texts):
-        texts = self.tokenizer(texts)
-        texts = self.data_collator(texts)
-        return texts
-            
+    
     def save_state(self, epoch):
         self.text_encoder.cpu()
         self.stage1_g.cpu(), self.stage1_d.cpu(), self.stage2_g.cpu(), self.stage2_d.cpu()
@@ -532,7 +490,7 @@ class Solver:
             dump(self, f)
 
     @staticmethod
-    def load(args, resume=True):
+    def load(args, resume=False):
         if resume and os.path.exists('resume.pkl'):
             with open(os.path.join('.', 'resume.pkl'), 'rb') as f:
                 solver = load(f)
@@ -650,6 +608,8 @@ class Solver:
         print(f'Use Device: {self.device}')
         torch.backends.cudnn.benchmark = True
         
+        self.load_dataset()
+        
         print('Use Scheduler: CosineAnnealingLR')
         
         self.text_encoder.train()
@@ -659,7 +619,7 @@ class Solver:
         self.stage2_d.train()
         
         hyper_params = {}
-        hyper_params['CSV Path'] = self.args.csv_path
+        hyper_params['Text Dir'] = self.args.text_dir
         hyper_params['Image Dir'] = self.args.image_dir
         hyper_params['Result Dir'] = self.args.result_dir
         hyper_params['Weight Dir'] = self.args.weight_dir
@@ -678,11 +638,14 @@ class Solver:
             epoch_loss_G = 0.0
             epoch_loss_D = 0.0
             
-            for iters, (images, texts) in enumerate(tqdm(self.dataloader)):
+            for iters, (images, attention_mask, input_ids, token_type_ids) in enumerate(tqdm(self.dataloader)):
                 iters += 1
                 
                 images = images.to(self.device, non_blocking=True)
-                texts = self.tokenize(texts).to(self.device)
+                attention_mask = attention_mask.to(self.device, non_blocking=True)
+                input_ids = input_ids.to(self.device, non_blocking=True)
+                token_type_ids = token_type_ids.to(self.device, non_blocking=True)
+                texts = {'attention_mask': attention_mask, 'input_ids': input_ids, 'token_type_ids': token_type_ids}
                 
                 loss = self.trainGAN(self.epoch, iters, self.max_iters, images, texts)
                 
@@ -699,15 +662,15 @@ class Solver:
             self.scheduler_G.step()
             self.scheduler_D.step()
             
-            if not self.args.noresume:
-                self.save_resume()
+            #if not self.args.noresume:
+            #    self.save_resume()
     
     def generate(self, text):
         self.text_encoder.eval()
         self.stage1_g.eval()
         self.stage2_g.eval()
         
-        texts = self.tokenize([text]).to(self.device)
+        texts = self.data_collator(self.tokenizer([text])).to(self.device)
         print(self.tokenizer.convert_ids_to_tokens(texts['input_ids'][0].tolist()))
         
         texts = self.text_encoder(**texts)
@@ -723,7 +686,8 @@ class Solver:
 
 
 def main(args):
-    solver = Solver.load(args, resume=not args.noresume)
+    #solver = Solver.load(args, resume=not args.noresume)
+    solver = Solver.load(args)
     solver.load_state()
     
     if args.generate != '':
@@ -739,8 +703,8 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--csv_path', type=str, default='/mnt/c/Datasets/flickr-images-dataset/results.csv')
-    parser.add_argument('--image_dir', type=str, default='/mnt/c/Datasets/flickr-images-dataset/flickr30k_images/')
+    parser.add_argument('--text_dir', type=str, default='/mnt/c/Datasets/cub2002011/cvpr2016_cub/text_c10/')
+    parser.add_argument('--image_dir', type=str, default='/mnt/c/Datasets/cub2002011/CUB_200_2011/images/')
     parser.add_argument('--result_dir', type=str, default='results')
     parser.add_argument('--weight_dir', type=str, default='weights')
     parser.add_argument('--lr', type=float, default=0.0001)
@@ -749,7 +713,7 @@ if __name__ == '__main__':
     parser.add_argument('--num_train', type=int, default=100)
     parser.add_argument('--lambda_ms', type=float, default=1)
     parser.add_argument('--cpu', action='store_true')
-    parser.add_argument('--noresume', action='store_true')
+    #parser.add_argument('--noresume', action='store_true')
     parser.add_argument('--generate', type=str, default='')
     
     args, unknown = parser.parse_known_args()
