@@ -360,15 +360,16 @@ class CLIP(nn.Module):
 
 
 class ImageDataset(Dataset):
-    IMG_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.bmp']
-    
     def __init__(self, img_dir, transform=None):
         self.paths = self.get_paths(img_dir)
         self.transform = transform
     
     def get_paths(self, img_dir):
-        img_dir = Path(img_dir)
-        paths = [p for p in img_dir.iterdir() if p.suffix in ImageDataset.IMG_EXTENSIONS]
+        paths = []
+        print('Make image-path of directories.')
+        for root, dirs, files in tqdm(os.walk(img_dir)):
+            for file in files:
+                paths += [Path(os.path.join(root, file))]
         return paths
     
     def __getitem__(self, index):
@@ -385,15 +386,19 @@ class ImageDataset(Dataset):
 # In[ ]:
 
 
-class TextData:
-    def __init__(self, csv_path):
-        df = pd.read_csv(csv_path, sep='|')
-
-        print('Read filenames.')
-        self.filenames = df.iloc[:,0].tolist()
-        print('Tokenize texts.')
-        self.texts = [TextData.tokenizer(str(text)) for text in tqdm(df.iloc[:,2].tolist())]
-        
+class TextDataset:
+    def __init__(self, text_dir):
+        self.filenames = []
+        self.texts = []
+        print('Make text-data of directories.')
+        for root, dirs, files in tqdm(os.walk(text_dir)):
+            for file in files:
+                filename = os.path.splitext(file)
+                if filename[1] == '.txt':
+                    with open(os.path.join(root, file), 'r') as f:
+                        self.filenames += [filename[0] + '.jpg']
+                        self.texts += [TextDataset.tokenizer(f.read())]
+    
     @staticmethod
     def tokenizer(text):
         for s in string.punctuation:
@@ -408,7 +413,7 @@ class TextData:
         return self.filenames[index], self.texts[index]
         
     def __len__(self):
-        return len(self.texts)
+        return len(self.filenames)
     
     def tolist(self):
         return sum(self.texts, [])
@@ -419,19 +424,19 @@ class TextData:
 
 class TextAndImageDataset(ImageDataset):
     @staticmethod
-    def make_vocab(text_data: TextData, vocab_size=None):
+    def make_vocab(textdata: TextDataset, vocab_size=None):
         print('Generate word-ids.')
         word2id = {}
         word2id['<pad>'] = 0
         word2id['<unk>'] = 1
         
-        #wc = collections.Counter(text_data.tolist())
+        #wc = collections.Counter(textdata.tolist())
         #for i, (w, _) in enumerate(wc.most_common(vocab_size), 2):
         #    word2id[w] = i
         
         id2word = {v: k for k, v in word2id.items()}
 
-        for texts in tqdm(text_data):
+        for texts in tqdm(textdata):
             for words in texts:
                 for word in words:
                     if word not in word2id:
@@ -441,19 +446,19 @@ class TextAndImageDataset(ImageDataset):
         
         return word2id, id2word
     
-    def __init__(self, csv_path, img_dir, sentence_size, vocab_size=None, transform=None):
+    def __init__(self, text_dir, img_dir, sentence_size, vocab_size=None, transform=None):
         super().__init__(img_dir, transform)
         
         self.sentence_size = sentence_size
         
         if os.path.exists('textdata.dat'):
             with open(os.path.join('.', 'textdata.dat'), 'rb') as f:
-                self.text_data = load(f)
+                self.textdata = load(f)
                 print('Loaded textdata.dat.')
         else:
-            self.text_data = TextData(csv_path)
+            self.textdata = TextDataset(text_dir)
             with open(os.path.join('.', 'textdata.dat'), 'wb') as f:
-                dump(self.text_data, f)
+                dump(self.textdata, f)
                 print('Saved textdata.dat.')
         
         if os.path.exists('word2id.dat') and os.path.exists('id2word.dat'):
@@ -464,7 +469,7 @@ class TextAndImageDataset(ImageDataset):
                 self.id2word = load(f)
                 print('Loaded id2word.dat.')
         else:
-            self.word2id, self.id2word = TextAndImageDataset.make_vocab(self.text_data, vocab_size)
+            self.word2id, self.id2word = TextAndImageDataset.make_vocab(self.textdata, vocab_size)
             with open(os.path.join('.', 'word2id.dat'), 'wb') as f:
                 dump(self.word2id, f)
                 print('Saved word2id.dat.')
@@ -486,7 +491,7 @@ class TextAndImageDataset(ImageDataset):
         return tokens
     
     def __getitem__(self, index):
-        filename, text = self.text_data[index]
+        filename, text = self.textdata[index]
         
         path = [path for path in self.paths if filename == path.name][0]
         image = Image.open(path)
@@ -501,6 +506,9 @@ class TextAndImageDataset(ImageDataset):
         text = torch.LongTensor(text)
         
         return image, text
+    
+    def __len__(self):
+        return len(self.textdata)
 
 
 # In[ ]:
@@ -529,7 +537,7 @@ class Solver:
                 module.bias.data.fill_(0)
             
     def load_dataset(self, img_size=256):
-        self.dataset = TextAndImageDataset(self.args.csv_path, self.args.image_dir, self.args.CLIP_sentence_size,
+        self.dataset = TextAndImageDataset(self.args.text_dir, self.args.image_dir, self.args.CLIP_sentence_size,
                                            transform=transforms.Compose([
                                                transforms.Resize(int(img_size)),
                                                transforms.RandomCrop(img_size),
@@ -555,7 +563,7 @@ class Solver:
             dump(self, f)
     
     @staticmethod
-    def load(args, resume=True):
+    def load(args, resume=False):
         if resume and os.path.exists('resume.pkl'):
             with open(os.path.join('.', 'resume.pkl'), 'rb') as f:
                 print('Load resume.')
@@ -581,7 +589,7 @@ class Solver:
         self.CLIP.train()
         
         hyper_params = {}
-        hyper_params['CSV Path'] = self.args.csv_path
+        hyper_params['Text Dir'] = self.args.text_dir
         hyper_params['Image Dir'] = self.args.image_dir
         hyper_params['Result Dir'] = self.args.result_dir
         hyper_params['Weight Dir'] = self.args.weight_dir
@@ -640,15 +648,15 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--csv_path', type=str, default='/mnt/c/Datasets/flickr-images-dataset/results.csv')
-    parser.add_argument('--image_dir', type=str, default='/mnt/c/Datasets/flickr-images-dataset/flickr30k_images/')
+    parser.add_argument('--text_dir', type=str, default='/usr/share/datasets/cub2002011/cvpr2016_cub/text_c10/')
+    parser.add_argument('--image_dir', type=str, default='/usr/share/datasets/cub2002011/CUB_200_2011/images/')
     parser.add_argument('--result_dir', type=str, default='results')
     parser.add_argument('--weight_dir', type=str, default='weights')
     parser.add_argument('--CLIP_max_patches', type=int, default=128)
     parser.add_argument('--CLIP_patch_size', type=int, default=32)
-    parser.add_argument('--CLIP_sentence_size', type=int, default=128)
+    parser.add_argument('--CLIP_sentence_size', type=int, default=512)
     parser.add_argument('--lr', type=float, default=0.0001)
-    parser.add_argument('--batch_size', type=int, default=256)
+    parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--num_train', type=int, default=10)
     parser.add_argument('--cpu', action='store_true')
     parser.add_argument('--noresume', action='store_true')
