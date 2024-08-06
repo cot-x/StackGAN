@@ -416,17 +416,17 @@ class Solver:
         #print(summary(self.text_encoder.model.encoder))
         for param in self.text_encoder.parameters():
             param.requires_grad = False
-        for param in self.text_encoder.model.encoder.layer[-1].parameters():
-            param.requires_grad = True
+        #for param in self.text_encoder.model.encoder.layer[-1].parameters():
+        #    param.requires_grad = True
         
-        self.optimizer_G = optim.Adam([{'params': self.text_encoder.model.encoder.layer[-1].parameters(),
-                                        'lr': self.args.lr},
+        self.optimizer_G = optim.Adam([#{'params': self.text_encoder.model.encoder.layer[-1].parameters(),
+                                       # 'lr': self.args.lr},
                                        {'params': itertools.chain(self.stage1_g.parameters(),
                                                                   self.stage2_g.parameters()),
                                         'lr': 2 * self.args.lr}],
                                       betas=(0, 0.9))
-        self.optimizer_D = optim.Adam([{'params': self.text_encoder.model.encoder.layer[-1].parameters(),
-                                        'lr': self.args.lr * self.args.mul_lr_dis},
+        self.optimizer_D = optim.Adam([#{'params': self.text_encoder.model.encoder.layer[-1].parameters(),
+                                       # 'lr': self.args.lr * self.args.mul_lr_dis},
                                        {'params': itertools.chain(self.stage1_d.parameters(),
                                                                   self.stage2_d.parameters()),
                                         'lr': 2 * self.args.lr * self.args.mul_lr_dis}],
