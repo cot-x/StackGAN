@@ -707,7 +707,7 @@ if __name__ == '__main__':
     parser.add_argument('--image_dir', type=str, default='/mnt/c/Datasets/cub2002011/CUB_200_2011/images/')
     parser.add_argument('--result_dir', type=str, default='results')
     parser.add_argument('--weight_dir', type=str, default='weights')
-    parser.add_argument('--lr', type=float, default=0.0001)
+    parser.add_argument('--lr', type=float, default=0.00001)
     parser.add_argument('--mul_lr_dis', type=float, default=4)
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--num_train', type=int, default=100)

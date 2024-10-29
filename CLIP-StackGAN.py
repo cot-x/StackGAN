@@ -1067,7 +1067,7 @@ if __name__ == '__main__':
     parser.add_argument('--CLIP_patch_size', type=int, default=32)
     parser.add_argument('--CLIP_sentence_size', type=int, default=512)
     parser.add_argument('--aug_threshold', type=float, default=0.6)
-    parser.add_argument('--lr', type=float, default=0.0001)
+    parser.add_argument('--lr', type=float, default=0.00001)
     parser.add_argument('--mul_lr_dis', type=float, default=4)
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--num_train', type=int, default=100)
