@@ -4,8 +4,8 @@
 # In[ ]:
 
 
-#from comet_ml import Experiment
-#experiment = Experiment()
+from comet_ml import Experiment
+experiment = Experiment()
 
 
 # In[ ]:
@@ -385,7 +385,7 @@ class CLIP(nn.Module):
 
 
 class STAGE1_G(nn.Module):
-    def __init__(self, dim_c_code=128, dim_noise=128, dim_ideal=1024):
+    def __init__(self, dim_c_code=128, dim_noise=64, dim_ideal=512):
         super().__init__()
         
         self.dim_noise = dim_noise
@@ -441,7 +441,7 @@ class STAGE1_G(nn.Module):
 
 
 class STAGE1_D(nn.Module):
-    def __init__(self, dim_c_code=128, dim_ideal=64):
+    def __init__(self, dim_c_code=128, dim_ideal=32):
         super().__init__()
         
         def downBlock(dim_in, dim_out):
@@ -477,7 +477,7 @@ class STAGE1_D(nn.Module):
 
 
 class STAGE2_G(nn.Module):
-    def __init__(self, dim_c_code=128, dim_ideal=128, n_residual=4):
+    def __init__(self, dim_c_code=128, dim_ideal=64, n_residual=4):
         super().__init__()
         
         def upBlock(dim_in, dim_out):
@@ -547,7 +547,7 @@ class STAGE2_G(nn.Module):
 
 
 class STAGE2_D(nn.Module):
-    def __init__(self, dim_c_code=128, dim_ideal=64):
+    def __init__(self, dim_c_code=128, dim_ideal=32):
         super().__init__()
         
         def downBlock(dim_in, dim_out):
@@ -751,7 +751,7 @@ class Solver:
         self.device = torch.device("cuda" if has_cuda else "cpu")
         
         self.args = args
-        self.pseudo_aug = 0.0
+        #self.pseudo_aug = 0.0
         self.epoch = 0
         
         self.load_dataset()
@@ -882,9 +882,9 @@ class Solver:
         fake_img_2, vc_loss_2 = self.stage2_g(fake_img_1, text)
         fake_score_2 = self.stage2_d(fake_img_2, text)
         
-        # for Mode-Seeking
-        _fake_img_2 = Variable(fake_img_2.data)
-        _noise = Variable(noise.data)
+        ## for Mode-Seeking
+        #_fake_img_2 = Variable(fake_img_2.data)
+        #_noise = Variable(noise.data)
         
         real_score_1 = self.stage1_d(real_img_64, text)
         real_score_2 = self.stage2_d(real_img_256, text)
@@ -893,22 +893,23 @@ class Solver:
         real_src_loss = torch.sum((real_score_1 + real_score_2 - b) ** 2)
         
         # Compute loss with fake images.
-        p = random.uniform(0, 1)
-        if 1 - self.pseudo_aug < p:
-            fake_src_loss = torch.sum((fake_score_1 + fake_score_2 - b) ** 2) # Pseudo: fake is real.
-        else:
-            fake_src_loss = torch.sum((fake_score_1 + fake_score_2 - a) ** 2)
+        #p = random.uniform(0, 1)
+        #if 1 - self.pseudo_aug < p:
+        #    fake_src_loss = torch.sum((fake_score_1 + fake_score_2 - b) ** 2) # Pseudo: fake is real.
+        #else:
+        #    fake_src_loss = torch.sum((fake_score_1 + fake_score_2 - a) ** 2)
+        fake_src_loss = torch.sum((fake_score_1 + fake_score_2 - a) ** 2)
         
         vc_loss = (vc_loss_1 + vc_loss_2) * 1e-5
         
-        # Update Probability Augmentation.
-        lz = (torch.sign(torch.logit(real_score_1 + real_score_2)).mean()
-              - torch.sign(torch.logit(fake_score_1 + fake_score_2)).mean()) / 2
-        if lz > self.args.aug_threshold:
-            self.pseudo_aug += 0.01
-        else:
-            self.pseudo_aug -= 0.01
-        self.pseudo_aug = min(1, max(0, self.pseudo_aug))
+        ## Update Probability Augmentation.
+        #lz = (torch.sign(torch.logit(real_score_1 + real_score_2)).mean()
+        #      - torch.sign(torch.logit(fake_score_1 + fake_score_2)).mean()) / 2
+        #if lz > self.args.aug_threshold:
+        #    self.pseudo_aug += 0.01
+        #else:
+        #    self.pseudo_aug -= 0.01
+        #self.pseudo_aug = min(1, max(0, self.pseudo_aug))
         
         # Backward and optimize.
         d_loss = 0.5 * (real_src_loss + fake_src_loss) / self.args.batch_size + vc_loss
@@ -919,7 +920,7 @@ class Solver:
         # Logging.
         loss['D/loss'] = d_loss.item()
         loss['D/vc_loss'] = vc_loss.item()
-        loss['D/pseudo_aug'] = self.pseudo_aug
+        #loss['D/pseudo_aug'] = self.pseudo_aug
         
         # ================================================================================ #
         #                               Train the generator                                #
@@ -937,20 +938,20 @@ class Solver:
         # Compute loss with fake images.
         fake_src_loss = torch.sum((fake_score_1 + fake_score_2 - c) ** 2)
         
-        # Mode Seeking Loss
-        lz = torch.mean(torch.abs(fake_img_2 - _fake_img_2)) / torch.mean(torch.abs(noise - _noise))
-        eps = 1 * 1e-5
-        ms_loss = 1 / (lz + eps)
+        ## Mode Seeking Loss
+        #lz = torch.mean(torch.abs(fake_img_2 - _fake_img_2)) / torch.mean(torch.abs(noise - _noise))
+        #eps = 1 * 1e-5
+        #ms_loss = 1 / (lz + eps)
         
         # Backward and optimize.
-        g_loss = 0.5 * fake_src_loss / self.args.batch_size + self.args.lambda_ms * ms_loss
+        g_loss = 0.5 * fake_src_loss / self.args.batch_size #+ self.args.lambda_ms * ms_loss
         self.optimizer_G.zero_grad()
         g_loss.backward()
         self.optimizer_G.step()
 
         # Logging.
         loss['G/loss'] = g_loss.item()
-        loss['G/ms_loss'] = ms_loss.item()
+        #loss['G/ms_loss'] = ms_loss.item()
         
         # Save
         if iters == max_iters:
@@ -982,16 +983,16 @@ class Solver:
         hyper_params['CLIP_max_patches'] = self.args.CLIP_max_patches
         hyper_params['CLIP_patch_size'] = self.args.CLIP_patch_size
         hyper_params['CLIP_sentence_size'] = self.args.CLIP_sentence_size
-        hyper_params['Prob-Aug-Threshold'] = self.args.aug_threshold
+        #hyper_params['Prob-Aug-Threshold'] = self.args.aug_threshold
         hyper_params['Learning Rate'] = self.args.lr
         hyper_params["Mul Discriminator's LR"] = self.args.mul_lr_dis
         hyper_params['Batch Size'] = self.args.batch_size
         hyper_params['Num Train'] = self.args.num_train
-        hyper_params['Lambda Mode-Seeking'] = self.args.lambda_ms
+        #hyper_params['Lambda Mode-Seeking'] = self.args.lambda_ms
 
         for key in hyper_params.keys():
             print(f'{key}: {hyper_params[key]}')
-        #experiment.log_parameters(hyper_params)
+        experiment.log_parameters(hyper_params)
         
         while self.args.num_train > self.epoch:
             self.epoch += 1
@@ -1010,7 +1011,7 @@ class Solver:
                 epoch_loss_CLIP += loss['CLIP/loss']
                 epoch_loss_G += loss['G/loss']
                 epoch_loss_D += loss['D/loss']
-                #experiment.log_metrics(loss)
+                experiment.log_metrics(loss)
             
             epoch_loss = epoch_loss_CLIP + epoch_loss_G + epoch_loss_D
             
@@ -1051,7 +1052,7 @@ def main(args):
         return
     
     solver.train()
-    #experiment.end()
+    experiment.end()
 
 
 # In[ ]:
@@ -1066,12 +1067,12 @@ if __name__ == '__main__':
     parser.add_argument('--CLIP_max_patches', type=int, default=128)
     parser.add_argument('--CLIP_patch_size', type=int, default=32)
     parser.add_argument('--CLIP_sentence_size', type=int, default=512)
-    parser.add_argument('--aug_threshold', type=float, default=0.6)
+    #parser.add_argument('--aug_threshold', type=float, default=0.6)
     parser.add_argument('--lr', type=float, default=0.00001)
     parser.add_argument('--mul_lr_dis', type=float, default=4)
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--num_train', type=int, default=100)
-    parser.add_argument('--lambda_ms', type=float, default=1)
+    #parser.add_argument('--lambda_ms', type=float, default=1)
     parser.add_argument('--cpu', action='store_true')
     parser.add_argument('--noresume', action='store_true')
     parser.add_argument('--generate', type=str, default='')
