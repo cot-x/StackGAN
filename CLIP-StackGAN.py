@@ -33,6 +33,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import torch_optimizer
+from torch.cuda.amp import GradScaler
 
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.autograd import Variable
@@ -385,7 +387,7 @@ class CLIP(nn.Module):
 
 
 class STAGE1_G(nn.Module):
-    def __init__(self, dim_c_code=128, dim_noise=64, dim_ideal=512):
+    def __init__(self, dim_c_code=128, dim_noise=64, dim_ideal=1024):
         super().__init__()
         
         self.dim_noise = dim_noise
@@ -441,7 +443,7 @@ class STAGE1_G(nn.Module):
 
 
 class STAGE1_D(nn.Module):
-    def __init__(self, dim_c_code=128, dim_ideal=32):
+    def __init__(self, dim_c_code=128, dim_ideal=64):
         super().__init__()
         
         def downBlock(dim_in, dim_out):
@@ -477,7 +479,7 @@ class STAGE1_D(nn.Module):
 
 
 class STAGE2_G(nn.Module):
-    def __init__(self, dim_c_code=128, dim_ideal=64, n_residual=4):
+    def __init__(self, dim_c_code=128, dim_ideal=128, n_residual=1):
         super().__init__()
         
         def upBlock(dim_in, dim_out):
@@ -547,7 +549,7 @@ class STAGE2_G(nn.Module):
 
 
 class STAGE2_D(nn.Module):
-    def __init__(self, dim_c_code=128, dim_ideal=32):
+    def __init__(self, dim_c_code=128, dim_ideal=64):
         super().__init__()
         
         def downBlock(dim_in, dim_out):
@@ -770,13 +772,14 @@ class Solver:
         self.stage2_g.apply(self.weights_init)
         self.stage2_d.apply(self.weights_init)
         
-        self.optimizer_CLIP = optim.Adam(self.CLIP.parameters(), lr=self.args.lr, betas=(0, 0.9))
-        self.optimizer_G = optim.Adam(itertools.chain(self.stage1_g.parameters(),
-                                                      self.stage2_g.parameters()),
-                                      lr=self.args.lr, betas=(0, 0.9))
-        self.optimizer_D = optim.Adam(itertools.chain(self.stage1_d.parameters(),
-                                                      self.stage2_d.parameters()),
-                                      lr=self.args.lr * self.args.mul_lr_dis, betas=(0, 0.9))
+        self.optimizer_CLIP = torch_optimizer.Lamb(self.CLIP.parameters(), lr=self.args.lr, betas=(0, 0.9))
+        self.optimizer_G = torch_optimizer.Lamb(itertools.chain(self.stage1_g.parameters(),
+                                                                self.stage2_g.parameters()),
+                                                lr=self.args.lr, betas=(0, 0.9))
+        self.optimizer_D = torch_optimizer.Lamb(itertools.chain(self.stage1_d.parameters(),
+                                                                self.stage2_d.parameters()),
+                                                lr=self.args.lr * self.args.mul_lr_dis, betas=(0, 0.9))
+        self.scaler = GradScaler()
     
     def weights_init(self, module):
         if type(module) == nn.Linear or type(module) == nn.Conv2d or type(module) == nn.ConvTranspose2d:
@@ -838,7 +841,8 @@ class Solver:
             return Solver(args)
     
     def trainCLIP(self, images, texts):
-        clip_loss = self.CLIP(images, texts)
+        with torch.autocast(device_type='cuda' if str(self.device).startswith('cuda') else 'cpu'):
+            clip_loss = self.CLIP(images, texts)
         
         # Backward and optimize.
         self.optimizer_CLIP.zero_grad()
@@ -872,50 +876,52 @@ class Solver:
         # ================================================================================ #
         #                             Train the discriminator                              #
         # ================================================================================ #
-        
-        text = self.CLIP.text_encoder(texts)
-        text = text.detach()
-        
-        fake_img_1, vc_loss_1, noise = self.stage1_g(text)
-        fake_score_1 = self.stage1_d(fake_img_1, text)
-        
-        fake_img_2, vc_loss_2 = self.stage2_g(fake_img_1, text)
-        fake_score_2 = self.stage2_d(fake_img_2, text)
-        
-        ## for Mode-Seeking
-        #_fake_img_2 = Variable(fake_img_2.data)
-        #_noise = Variable(noise.data)
-        
-        real_score_1 = self.stage1_d(real_img_64, text)
-        real_score_2 = self.stage2_d(real_img_256, text)
-        
-        # Compute loss with real images.
-        real_src_loss = torch.sum((real_score_1 + real_score_2 - b) ** 2)
-        
-        # Compute loss with fake images.
-        #p = random.uniform(0, 1)
-        #if 1 - self.pseudo_aug < p:
-        #    fake_src_loss = torch.sum((fake_score_1 + fake_score_2 - b) ** 2) # Pseudo: fake is real.
-        #else:
-        #    fake_src_loss = torch.sum((fake_score_1 + fake_score_2 - a) ** 2)
-        fake_src_loss = torch.sum((fake_score_1 + fake_score_2 - a) ** 2)
-        
-        vc_loss = (vc_loss_1 + vc_loss_2) * 1e-5
-        
-        ## Update Probability Augmentation.
-        #lz = (torch.sign(torch.logit(real_score_1 + real_score_2)).mean()
-        #      - torch.sign(torch.logit(fake_score_1 + fake_score_2)).mean()) / 2
-        #if lz > self.args.aug_threshold:
-        #    self.pseudo_aug += 0.01
-        #else:
-        #    self.pseudo_aug -= 0.01
-        #self.pseudo_aug = min(1, max(0, self.pseudo_aug))
+
+        with torch.autocast(device_type='cuda' if str(self.device).startswith('cuda') else 'cpu'):
+            text = self.CLIP.text_encoder(texts)
+            text = text.detach()
+            
+            fake_img_1, vc_loss_1, noise = self.stage1_g(text)
+            fake_score_1 = self.stage1_d(fake_img_1, text)
+            
+            fake_img_2, vc_loss_2 = self.stage2_g(fake_img_1, text)
+            fake_score_2 = self.stage2_d(fake_img_2, text)
+            
+            ## for Mode-Seeking
+            #_fake_img_2 = Variable(fake_img_2.data)
+            #_noise = Variable(noise.data)
+            
+            real_score_1 = self.stage1_d(real_img_64, text)
+            real_score_2 = self.stage2_d(real_img_256, text)
+            
+            # Compute loss with real images.
+            real_src_loss = torch.sum((real_score_1 + real_score_2 - b) ** 2)
+            
+            # Compute loss with fake images.
+            #p = random.uniform(0, 1)
+            #if 1 - self.pseudo_aug < p:
+            #    fake_src_loss = torch.sum((fake_score_1 + fake_score_2 - b) ** 2) # Pseudo: fake is real.
+            #else:
+            #    fake_src_loss = torch.sum((fake_score_1 + fake_score_2 - a) ** 2)
+            fake_src_loss = torch.sum((fake_score_1 + fake_score_2 - a) ** 2)
+            
+            vc_loss = (vc_loss_1 + vc_loss_2) * 1e-5
+            
+            ## Update Probability Augmentation.
+            #lz = (torch.sign(torch.logit(real_score_1 + real_score_2)).mean()
+            #      - torch.sign(torch.logit(fake_score_1 + fake_score_2)).mean()) / 2
+            #if lz > self.args.aug_threshold:
+            #    self.pseudo_aug += 0.01
+            #else:
+            #    self.pseudo_aug -= 0.01
+            #self.pseudo_aug = min(1, max(0, self.pseudo_aug))
+            
+            d_loss = 0.5 * (real_src_loss + fake_src_loss) / self.args.batch_size + vc_loss
         
         # Backward and optimize.
-        d_loss = 0.5 * (real_src_loss + fake_src_loss) / self.args.batch_size + vc_loss
-        self.optimizer_D.zero_grad()
-        d_loss.backward()
-        self.optimizer_D.step()
+        self.scaler.scale(d_loss).backward()
+        self.scaler.step(self.optimizer_D)
+        self.scaler.update()
         
         # Logging.
         loss['D/loss'] = d_loss.item()
@@ -925,29 +931,31 @@ class Solver:
         # ================================================================================ #
         #                               Train the generator                                #
         # ================================================================================ #
-        
-        text = self.CLIP.text_encoder(texts)
-        text = text.detach()
-        
-        fake_img_1, vc_loss_1, noise = self.stage1_g(text)
-        fake_score_1 = self.stage1_d(fake_img_1, text)
-        
-        fake_img_2, vc_loss_2 = self.stage2_g(fake_img_1, text)
-        fake_score_2 = self.stage2_d(fake_img_2, text)
-        
-        # Compute loss with fake images.
-        fake_src_loss = torch.sum((fake_score_1 + fake_score_2 - c) ** 2)
-        
-        ## Mode Seeking Loss
-        #lz = torch.mean(torch.abs(fake_img_2 - _fake_img_2)) / torch.mean(torch.abs(noise - _noise))
-        #eps = 1 * 1e-5
-        #ms_loss = 1 / (lz + eps)
+
+        with torch.autocast(device_type='cuda' if str(self.device).startswith('cuda') else 'cpu'):
+            text = self.CLIP.text_encoder(texts)
+            text = text.detach()
+            
+            fake_img_1, vc_loss_1, noise = self.stage1_g(text)
+            fake_score_1 = self.stage1_d(fake_img_1, text)
+            
+            fake_img_2, vc_loss_2 = self.stage2_g(fake_img_1, text)
+            fake_score_2 = self.stage2_d(fake_img_2, text)
+            
+            # Compute loss with fake images.
+            fake_src_loss = torch.sum((fake_score_1 + fake_score_2 - c) ** 2)
+            
+            ## Mode Seeking Loss
+            #lz = torch.mean(torch.abs(fake_img_2 - _fake_img_2)) / torch.mean(torch.abs(noise - _noise))
+            #eps = 1 * 1e-5
+            #ms_loss = 1 / (lz + eps)
+            
+            g_loss = 0.5 * fake_src_loss / self.args.batch_size #+ self.args.lambda_ms * ms_loss
         
         # Backward and optimize.
-        g_loss = 0.5 * fake_src_loss / self.args.batch_size #+ self.args.lambda_ms * ms_loss
-        self.optimizer_G.zero_grad()
-        g_loss.backward()
-        self.optimizer_G.step()
+        self.scaler.scale(g_loss).backward()
+        self.scaler.step(self.optimizer_G)
+        self.scaler.update()
 
         # Logging.
         loss['G/loss'] = g_loss.item()
